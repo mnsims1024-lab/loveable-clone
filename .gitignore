@@ -256,3 +256,5 @@ config/local.json
 config/local.js
 config/local.yml
 config/local.yaml
+# Generated apps
+projects/
