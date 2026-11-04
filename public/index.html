@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loveable Clone</title>
+<style>
+  :root {
+    --bg: #fdf8f3; --card: #ffffff; --ink: #231f20; --muted: #5d5558;
+    --accent: #c2255c; --accent-ink: #ffffff; --line: #e6dcd3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1819; --card: #262122; --ink: #f6eeea; --muted: #b9adaa; --accent: #ff7aa8; --accent-ink: #1c1819; --line: #3a3234; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 18px/1.5 system-ui, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  h1 { margin: 8px 0 0; font-size: 1.6rem; }
+  p.sub { margin: 0; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  label { font-weight: 600; display: block; margin-bottom: 8px; }
+  textarea { width: 100%; min-height: 120px; padding: 12px; font: inherit; color: var(--ink); background: var(--bg); border: 2px solid var(--line); border-radius: 10px; resize: vertical; }
+  textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  button { font: inherit; font-weight: 600; min-height: 48px; padding: 0 20px; border-radius: 10px; border: 2px solid var(--accent); cursor: pointer; background: var(--accent); color: var(--accent-ink); }
+  button.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  #status { min-height: 1.5em; color: var(--muted); }
+  #log { margin: 0; padding-left: 20px; color: var(--muted); font-size: .95rem; max-height: 160px; overflow: auto; }
+  #error { color: #b42318; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { #error { color: #ff9b8f; } }
+  iframe { width: 100%; height: 60vh; min-height: 360px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  .hidden { display: none; }
+  a { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Loveable Clone</h1>
+    <p class="sub">Describe an app in your own words. Claude builds it, and you can keep asking for changes.</p>
+  </header>
+
+  <section class="card">
+    <label for="prompt" id="promptLabel">What would you like to build?</label>
+    <textarea id="prompt" placeholder="A big-button daily medication checklist that remembers what I tapped today"></textarea>
+    <div class="row">
+      <button id="build">Build it</button>
+      <button id="cancel" class="secondary hidden">Stop</button>
+      <button id="fresh" class="secondary hidden">Start a new app</button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+    <p id="error" role="alert"></p>
+    <ul id="log" class="hidden" aria-label="Build progress"></ul>
+  </section>
+
+  <section class="card hidden" id="previewCard">
+    <div class="row" style="margin:0 0 12px; align-items:center; justify-content:space-between">
+      <strong>Your app</strong>
+      <a id="openTab" href="#" target="_blank" rel="noopener">Open in a new tab</a>
+    </div>
+    <iframe id="frame" title="Preview of your app" sandbox="allow-scripts allow-forms allow-modals allow-same-origin"></iframe>
+    <p id="files" class="sub" style="margin-top:12px"></p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let projectId = null;
+let previewOrigin = '';
+let controller = null;
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  previewOrigin = c.previewOrigin;
+  if (!c.hasKey) $('error').textContent = 'No API key yet. Add ANTHROPIC_API_KEY to your .env file and restart.';
+});
+
+function setBusy(on) {
+  $('build').disabled = on;
+  $('prompt').disabled = on;
+  $('cancel').classList.toggle('hidden', !on);
+}
+
+function addLog(text) {
+  const li = document.createElement('li');
+  li.textContent = text;
+  $('log').appendChild(li);
+  $('log').classList.remove('hidden');
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function showPreview(files) {
+  const url = `${previewOrigin}/p/${projectId}/`;
+  $('previewCard').classList.remove('hidden');
+  $('frame').src = url + '?t=' + Date.now();
+  $('openTab').href = url;
+  $('files').textContent = files?.length ? 'Files: ' + files.join(', ') : '';
+  $('fresh').classList.remove('hidden');
+  $('promptLabel').textContent = 'What would you like to change?';
+  $('prompt').placeholder = 'Make the text bigger and add a dark mode';
+}
+
+$('fresh').onclick = () => {
+  projectId = null;
+  $('previewCard').classList.add('hidden');
+  $('fresh').classList.add('hidden');
+  $('log').innerHTML = ''; $('log').classList.add('hidden');
+  $('promptLabel').textContent = 'What would you like to build?';
+  $('status').textContent = ''; $('error').textContent = '';
+  $('prompt').value = ''; $('prompt').focus();
+};
+
+$('cancel').onclick = () => controller?.abort();
+
+$('build').onclick = async () => {
+  const prompt = $('prompt').value.trim();
+  if (!prompt) { $('error').textContent = 'Please type what you want first.'; $('prompt').focus(); return; }
+
+  $('error').textContent = '';
+  $('log').innerHTML = '';
+  $('status').textContent = projectId ? 'Making your changes…' : 'Building your app. This can take a minute or two…';
+  setBusy(true);
+  controller = new AbortController();
+
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, projectId }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Request failed.');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', done = null, failed = null;
+
+    while (true) {
+      const { value, done: end } = await reader.read();
+      if (end) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const e = JSON.parse(line);
+        if (e.type === 'start') projectId = e.projectId;
+        else if (e.type === 'tool' && e.file) addLog(`${e.name === 'Read' ? 'Reading' : 'Writing'} ${e.file}`);
+        else if (e.type === 'done') done = e;
+        else if (e.type === 'error') failed = e.message;
+      }
+    }
+
+    if (failed) throw new Error(failed);
+    if (!done) throw new Error('The build ended unexpectedly.');
+    $('status').textContent = done.summary || 'Done.';
+    $('prompt').value = '';
+    showPreview(done.files);
+  } catch (err) {
+    $('status').textContent = '';
+    $('error').textContent = err.name === 'AbortError' ? 'Stopped.' : err.message;
+    if (projectId) {
+      const r = await fetch(`/api/projects/${projectId}/files`).then(r => r.json()).catch(() => null);
+      if (r?.files?.length) showPreview(r.files);
+    }
+  } finally {
+    setBusy(false);
+  }
+};
+</script>
+</body>
+</html>
